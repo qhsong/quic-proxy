@@ -6,84 +6,60 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
-	"fmt"
 	"io"
 	"log"
 	"math/big"
 	"net"
 
+	"../proxy"
 	quic "github.com/lucas-clemente/quic-go"
 )
 
 const addr = ":4242"
 
-const message = "foobar"
-
-// We start a server echoing data on the first stream the client opens,
-// then connect with a client, send the message, and wait for its receipt.
 func main() {
-	conn, err := net.Dial("tcp", "localhost:80")
-	if err != nil {
-		log.Fatal(err)
-	}
-	echoServer(conn)
+	StartServer()
 }
 
 // Start a server that echos all data on the first stream opened by the client
-func echoServer(conn net.Conn) error {
+func StartServer() error {
 	cfgServer := &quic.Config{
 		TLSConfig: generateTLSConfig(),
-		ConnState: func(sess quic.Session, cs quic.ConnState) {
-			// Ignore unless the handshake is finished
-			if cs != quic.ConnStateForwardSecure {
-				return
-			}
-			go func() {
-				stream, err := sess.AcceptStream()
-				if err != nil {
-					panic(err)
-				}
-				// Echo through the loggingWriter
-				go pipeline(conn, stream)
-				go pipeline(stream, conn)
-			}()
-		},
 	}
 	listener, err := quic.ListenAddr(addr, cfgServer)
 	if err != nil {
 		return err
 	}
-	return listener.Serve()
-}
 
-func clientMain() error {
-	cfgClient := &quic.Config{
-		TLSConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	session, err := quic.DialAddr(addr, cfgClient)
-	if err != nil {
-		return err
-	}
+	log.Println("start listen", addr)
+	for {
+		sess, err := listener.Accept()
+		if err != nil {
 
-	stream, err := session.OpenStreamSync()
-	if err != nil {
-		return err
-	}
+		}
+		go func() {
+			stream, err := sess.AcceptStream()
+			if err != nil {
+				panic(err)
+			}
 
-	fmt.Printf("Client: Sending '%s'\n", message)
-	_, err = stream.Write([]byte(message))
-	if err != nil {
-		return err
-	}
+			result, err := proxy.ReadAuthInfo(stream)
+			if err != nil {
+				log.Println(err)
+			}
+			conn, err := net.Dial("tcp", result.EndPoint+":"+result.Port)
+			if err != nil {
+				proxy.HandleServerAuthFailed(stream)
+				log.Println("Unable to connect", result.EndPoint+":"+result.Port)
+			}
 
-	buf := make([]byte, len(message))
-	_, err = io.ReadFull(stream, buf)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("Client: Got '%s'\n", buf)
+			proxy.HandleServerAuthSuccess(stream)
 
-	return nil
+			// Echo through the loggingWriter
+			go pipeline(conn, stream)
+			go pipeline(stream, conn)
+		}()
+	}
 }
 
 // Setup a bare-bones TLS config for the server

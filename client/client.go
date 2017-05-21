@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 
 	"../proxy"
 	quic "github.com/lucas-clemente/quic-go"
@@ -49,17 +50,10 @@ func main() {
 		log.Println("Unable to read remote server address")
 	}
 
-	cfgClient := &quic.Config{
-		TLSConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	session, err := quic.DialAddr(serverAddr, cfgClient)
-	if err != nil {
-		return
-	}
-	run(session)
+	run()
 }
 
-func run(session quic.Session) {
+func run() {
 
 	ln, err := net.Listen("tcp", ":"+strconv.Itoa(config.LocalPort))
 	if err != nil {
@@ -72,12 +66,12 @@ func run(session quic.Session) {
 			log.Println("accept:", err)
 			continue
 		}
-		go handleConnection(conn, session)
+		go handleConnection(conn)
 	}
 
 }
 
-func handleConnection(conn net.Conn, session quic.Session) {
+func handleConnection(conn net.Conn) {
 	closed := false
 	defer func() {
 		if !closed {
@@ -90,22 +84,33 @@ func handleConnection(conn net.Conn, session quic.Session) {
 		log.Println("socks handshake:", err)
 		return
 	}
-	rawaddr, host, err := getRequest(conn)
+	_, host, err := getRequest(conn)
+	EndPoint := strings.Split(host, ":")
 
+	cfgClient := &quic.Config{
+		TLSConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	session, err := quic.DialAddr(serverAddr, cfgClient)
+	if err != nil {
+		return
+	}
 	// Sending connection established message immediately to client.
 	// This some round trip time for creating socks connection with the client.
 	// But if connection failed, the client will get connection reset error.
+	stream, err := session.OpenStream()
+	if err != nil {
+		return
+	}
+
 	_, err = conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x08, 0x43})
 	if err != nil {
 		log.Println("send connection confirmation:", err)
 		return
 	}
 
-	stream, err := session.OpenStream()
-	if err != nil {
-		return
-	}
 	log.Println("Start pipeline")
+
+	proxy.RequestClientAuth(stream, "test", EndPoint[0], EndPoint[1])
 	go proxy.PipeThenClose(stream, conn)
 	proxy.PipeThenClose(conn, stream)
 
